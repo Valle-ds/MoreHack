@@ -12,7 +12,7 @@ import inference
 app = FastAPI()
 
 def prepare():
-    df = pd.read_csv(r'C:\test.csv')
+    df = pd.read_csv('test.csv')
 
     tokenizer = transformers.AutoTokenizer.from_pretrained('cointegrated/rubert-tiny2')
     model = transformers.AutoModel.from_pretrained('cointegrated/rubert-tiny2')
