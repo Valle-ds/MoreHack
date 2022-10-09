@@ -1,66 +1,56 @@
-from datetime import datetime, timedelta
-import requests
-from bs4 import BeautifulSoup
-import warnings
 import pandas as pd
+import transformers
 
-warnings.filterwarnings('ignore')
+import uvicorn
+from fastapi import FastAPI
+import numpy as np
+import torch
 
-
-def _extract_urls_from_html(html: str):
-    doc_tree = BeautifulSoup(html, "html.parser")
-    news_list = doc_tree.find_all("li", "archive-page__item _news")
-    return list(f"https://lenta.ru{news.find('a')['href']}" for news in news_list)
-
-
-def parse_article_html(html: str):
-    doc_tree = BeautifulSoup(html, "html.parser")
-    topic = doc_tree.find('span', class_='topic-body__title').text
-    text = " ".join([t.text for t in doc_tree.find_all('p', class_='topic-body__content-text')])
-    return [topic, text]
+import inference
 
 
-_from_date = datetime.strptime("30.09.2022", "%d.%m.%Y")
+app = FastAPI()
+
+def prepare():
+    df = pd.read_csv(r'C:\test.csv')
+
+    tokenizer = transformers.AutoTokenizer.from_pretrained('cointegrated/rubert-tiny2')
+    model = transformers.AutoModel.from_pretrained('cointegrated/rubert-tiny2')
+
+    
+    text_encoding = tokenizer(
+                list(df['text'].values),
+                max_length=256,
+                padding="max_length",
+                truncation=True,
+                return_attention_mask=True,
+                add_special_tokens=True,
+                return_tensors="pt")
+    out1_1 = []
+    res = 0 if len(text_encoding['input_ids']) % 128 == 0 else 1
+    for i in range(len(text_encoding['input_ids']) // 128 + res):
+        with torch.no_grad():
+            out1 = model(input_ids=text_encoding['input_ids'][i * 128: (i + 1) * 128].to('cpu'),
+                        attention_mask=text_encoding['attention_mask'][i * 128: (i + 1) * 128].to('cpu'))['last_hidden_state'][:, 0, :]
+            out1_1 += list(out1)
+
+    out1_1 = torch.stack(out1_1)
+    df['date'] = pd.to_datetime(df['date'])
+    return tokenizer, model, text_encoding, df, out1_1
+
+tokenizer, model , text_encoding, df, out1_1 = prepare()
+
+@app.get("/")
+def read_root():
+    return {"message": "Welcome from the API"}
+
+# task: 0 - инсайты, 1 - тренды, 2 - дайджесты
+@app.get("/predict")
+def get_image(profession, task=0, n=5):
+    posts = inference.inference(profession, task, n, tokenizer, model , text_encoding, df, out1_1)
+
+    return {"posts": posts}
 
 
-def get_request(url):
-    i = 0
-    while i < 5:
-        try:
-            return requests.get(url, verify=False, timeout=0.5).text
-        except:
-            i += 1
-    return None
-
-
-date_start, date_end = _from_date, datetime.today()
-df = []
-while date_start <= date_end:
-    new_date = date_start.strftime("%Y/%m/%d")
-    for i in range(4):
-        if i == 0:
-            news_page_url = "https://lenta.ru/news" + f"/{new_date}"
-        else:
-            news_page_url = "https://lenta.ru/news" + f"/{new_date}/page/{i + 1}/"
-
-        print(news_page_url)
-
-        html = get_request(news_page_url)
-        if html is None:
-            # date_start += timedelta(days=1)
-            print('error')
-            continue
-        texts_new = _extract_urls_from_html(html)
-        if len(texts_new) == 0:
-            break
-        for i in texts_new:
-            new_html = get_request(i)
-            if new_html is None:
-                print('error')
-                continue
-            params = parse_article_html(new_html)
-            df.append(params + [str(date_start.strftime("%Y/%m/%d"))])
-    date_start += timedelta(days=1)
-df = pd.DataFrame(df)
-df.columns = ['title', 'text', 'date']
-df.to_csv('test.csv', index=False)
+if __name__ == "__main__":
+    uvicorn.run("main:app", port=8080)
